@@ -20,10 +20,9 @@ on:
           - V10 Stealth X-Ray Person Logic (--person)
           - V5 Horizontal Business Scrape (Standard)
           - V9 Omniscience Mode (--omniscience)
-        default: 'V10 Stealth X-Ray Person Logic (--person)'
+        default: 'V5 Horizontal Business Scrape (Standard)'
 
 jobs:
-  # Job 1: Parse the comma-separated locations into a JSON array for the matrix
   setup-matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -31,7 +30,6 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          # Split by comma, trim whitespace, and format as JSON array
           IFS=',' read -r -a array <<< "${{ github.event.inputs.locations }}"
           json_array="["
           for i in "${!array[@]}"; do
@@ -44,7 +42,6 @@ jobs:
           json_array+="]"
           echo "locations=$json_array" >> $GITHUB_OUTPUT
 
-  # Job 2: Run the extraction in parallel for each location
   run-blast-engine:
     needs: setup-matrix
     runs-on: ubuntu-latest
@@ -69,13 +66,14 @@ jobs:
 
     - name: Install Python Dependencies
       run: |
-        pip install -r requirements.txt
-        pip install requests beautifulsoup4 fake-useragent # For V10 Bing/Brave backends
+        pip install requests beautifulsoup4 fake-useragent firecrawl-py pandas openai httpx # Re-adding deps inline to guarantee
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         
     - name: Spin up Firecrawl Services (Background)
       if: contains(github.event.inputs.mode, 'V5') || contains(github.event.inputs.mode, 'V9')
       run: |
         cd services/firecrawl/apps/api
+        touch .env.example
         touch .env
         echo "USE_DB_AUTHENTICATION=false" >> .env
         echo "PORT=3002" >> .env
@@ -84,7 +82,6 @@ jobs:
         docker compose up -d
         echo "Waiting for Firecrawl Docker container to boot strictly (30s)..."
         sleep 30
-        cd ../../
         
     - name: Execute B.L.A.S.T Engine (Location ${{ matrix.location }})
       env:
