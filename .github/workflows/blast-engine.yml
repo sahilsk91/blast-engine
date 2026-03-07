@@ -1,6 +1,8 @@
 name: B.L.A.S.T V10 Global Extractor
 
 on:
+  issues:
+    types: [opened]
   workflow_dispatch:
     inputs:
       query:
@@ -27,10 +29,35 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       locations_json: ${{ steps.set-matrix.outputs.locations }}
+      query: ${{ steps.set-matrix.outputs.query }}
+      count: ${{ steps.set-matrix.outputs.count }}
     steps:
       - id: set-matrix
         run: |
-          IFS=',' read -r -a array <<< "${{ github.event.inputs.locations }}"
+          if [ "${{ github.event_name }}" == "issues" ]; then
+            # Format expected: Niche in City1, City2 - Count
+            # Example: Dentists in Miami, Orlando - 50
+            TITLE="${{ github.event.issue.title }}"
+            QUERY=$(echo "$TITLE" | awk -F' in ' '{print $1}')
+            LOCS_AND_COUNT=$(echo "$TITLE" | awk -F' in ' '{print $2}')
+            LOCATIONS=$(echo "$LOCS_AND_COUNT" | awk -F' - ' '{print $1}')
+            COUNT=$(echo "$LOCS_AND_COUNT" | awk -F' - ' '{print $2}')
+            
+            # Defaults if parsing fails
+            if [ -z "$QUERY" ]; then QUERY="Business"; fi
+            if [ -z "$COUNT" ]; then COUNT="20"; fi
+            if [ -z "$LOCATIONS" ]; then LOCATIONS="Austin"; fi
+          else
+            # Manual workflow dispatch
+            QUERY="${{ github.event.inputs.query }}"
+            COUNT="${{ github.event.inputs.count }}"
+            LOCATIONS="${{ github.event.inputs.locations }}"
+          fi
+          
+          echo "query=$QUERY" >> $GITHUB_OUTPUT
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+          IFS=',' read -r -a array <<< "$LOCATIONS"
           json_array="["
           for i in "${!array[@]}"; do
             city="$(echo -e "${array[i]}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
@@ -89,9 +116,9 @@ jobs:
       run: |
         mkdir -p exports
         
-        QUERY="${{ github.event.inputs.query }}"
-        COUNT="${{ github.event.inputs.count }}"
-        MODE="${{ github.event.inputs.mode }}"
+        QUERY="${{ needs.setup-matrix.outputs.query }}"
+        COUNT="${{ needs.setup-matrix.outputs.count }}"
+        MODE="V5 Horizontal Business Scrape (Standard)"
         LOCATION="${{ matrix.location }}"
         
         FLAGS="--count $COUNT"
@@ -110,3 +137,14 @@ jobs:
       with:
         name: blast-leads-${{ matrix.location }}
         path: exports/*.csv
+
+    - name: Comment on Issue
+      if: github.event_name == 'issues'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        ISSUE_NUMBER: ${{ github.event.issue.number }}
+        LOCATION: ${{ matrix.location }}
+      run: |
+        gh issue comment $ISSUE_NUMBER -b "🚀 **Extraction Complete for $LOCATION!**
+        
+        The headless nodes have successfully dropped the payload. You can download your fresh CSVs from the top of the [Actions Run Page](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})."
