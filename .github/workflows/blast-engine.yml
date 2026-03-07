@@ -1,0 +1,117 @@
+name: B.L.A.S.T V10 Global Extractor
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: 'Niche / Role (e.g. Lawyer, Plumber, CEO)'
+        required: true
+      count:
+        description: 'Target leads per city (Max 100 for stability)'
+        default: '50'
+      locations:
+        description: 'Locations (comma-separated, e.g. "Houston, Austin, Dallas")'
+        required: true
+        default: 'Houston'
+      mode:
+        description: 'Extraction Mode'
+        type: choice
+        options:
+          - V10 Stealth X-Ray Person Logic (--person)
+          - V5 Horizontal Business Scrape (Standard)
+          - V9 Omniscience Mode (--omniscience)
+        default: 'V10 Stealth X-Ray Person Logic (--person)'
+
+jobs:
+  # Job 1: Parse the comma-separated locations into a JSON array for the matrix
+  setup-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      locations_json: ${{ steps.set-matrix.outputs.locations }}
+    steps:
+      - id: set-matrix
+        run: |
+          # Split by comma, trim whitespace, and format as JSON array
+          IFS=',' read -r -a array <<< "${{ github.event.inputs.locations }}"
+          json_array="["
+          for i in "${!array[@]}"; do
+            city="$(echo -e "${array[i]}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            json_array+="\"$city\""
+            if [ $i -lt $(( ${#array[@]} - 1 )) ]; then
+              json_array+=","
+            fi
+          done
+          json_array+="]"
+          echo "locations=$json_array" >> $GITHUB_OUTPUT
+
+  # Job 2: Run the extraction in parallel for each location
+  run-blast-engine:
+    needs: setup-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        location: ${{ fromJson(needs.setup-matrix.outputs.locations_json) }}
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+      with:
+        submodules: recursive
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install System Dependencies (Tesseract OCR)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y tesseract-ocr tesseract-ocr-eng libtesseract-dev
+
+    - name: Install Python Dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install requests beautifulsoup4 fake-useragent # For V10 Bing/Brave backends
+        
+    - name: Spin up Firecrawl Services (Background)
+      if: contains(github.event.inputs.mode, 'V5') || contains(github.event.inputs.mode, 'V9')
+      run: |
+        cd services/firecrawl/apps/api
+        cp .env.example .env
+        echo "USE_DB_AUTHENTICATION=false" >> .env
+        echo "PORT=3002" >> .env
+        echo "NUM_WORKERS=2" >> .env
+        cd ../../
+        docker compose up -d
+        echo "Waiting for Firecrawl Docker container to boot strictly (30s)..."
+        sleep 30
+        cd ../../
+        
+    - name: Execute B.L.A.S.T Engine (Location ${{ matrix.location }})
+      env:
+        NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      run: |
+        mkdir -p exports
+        
+        QUERY="${{ github.event.inputs.query }}"
+        COUNT="${{ github.event.inputs.count }}"
+        MODE="${{ github.event.inputs.mode }}"
+        LOCATION="${{ matrix.location }}"
+        
+        FLAGS="--count $COUNT"
+        
+        if [[ "$MODE" == *"--person"* ]]; then
+          FLAGS="$FLAGS --person --location \"$LOCATION\""
+        elif [[ "$MODE" == *"--omniscience"* ]]; then
+          FLAGS="$FLAGS --omniscience"
+        fi
+        
+        echo "Executing: python tools/lead_gen.py \"$QUERY\" $FLAGS"
+        eval "python tools/lead_gen.py \"$QUERY\" $FLAGS"
+
+    - name: Upload Leads Payload (CSV)
+      uses: actions/upload-artifact@v4
+      with:
+        name: blast-leads-${{ matrix.location }}
+        path: exports/*.csv

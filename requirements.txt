@@ -1,0 +1,11 @@
+pandas
+aiohttp
+pydantic
+googlesearch-python
+ddgs
+beautifulsoup4
+python-whois
+fake-useragent
+pytesseract
+Pillow
+dnspython
