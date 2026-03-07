@@ -76,7 +76,7 @@ jobs:
       if: contains(github.event.inputs.mode, 'V5') || contains(github.event.inputs.mode, 'V9')
       run: |
         cd services/firecrawl/apps/api
-        cp .env.example .env
+        touch .env
         echo "USE_DB_AUTHENTICATION=false" >> .env
         echo "PORT=3002" >> .env
         echo "NUM_WORKERS=2" >> .env
