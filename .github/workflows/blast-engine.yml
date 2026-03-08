@@ -24,6 +24,9 @@ on:
           - V9 Omniscience Mode (--omniscience)
         default: 'V5 Horizontal Business Scrape (Standard)'
 
+permissions:
+  issues: write
+
 jobs:
   setup-matrix:
     runs-on: ubuntu-latest
