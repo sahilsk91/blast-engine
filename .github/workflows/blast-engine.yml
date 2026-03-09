@@ -96,7 +96,7 @@ jobs:
 
     - name: Install Python Dependencies
       run: |
-        pip install requests beautifulsoup4 fake-useragent firecrawl-py pandas openai httpx # Re-adding deps inline to guarantee
+        pip install requests beautifulsoup4 fake-useragent firecrawl-py pandas openai httpx duckduckgo-search
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         
     - name: Spin up Firecrawl Services (Background)
