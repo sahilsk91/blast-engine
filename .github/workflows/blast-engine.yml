@@ -96,7 +96,7 @@ jobs:
 
     - name: Install Python Dependencies
       run: |
-        pip install requests beautifulsoup4 fake-useragent pandas openai httpx duckduckgo-search dnspython python-whois pytesseract Pillow aiohttp pydantic
+        pip install requests beautifulsoup4 fake-useragent pandas openai httpx duckduckgo-search dnspython python-whois pytesseract Pillow aiohttp pydantic googlesearch-python python-dotenv
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         
 
