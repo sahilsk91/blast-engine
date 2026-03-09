@@ -1,291 +1,354 @@
 """
-B.L.A.S.T V11 - Pure Python Web Scraping Engine
-Zero Docker, Zero Paid APIs, 100% Production-Grade.
+B.L.A.S.T V12 — Extraction Engine (Insane Mode)
+=================================================
+8-layer waterfall per URL, all free, all Python, no APIs:
 
-Waterfall extraction pipeline per URL:
-  1. Pure Python requests + BeautifulSoup (instant, no dependencies)
-  2. Deep crawl: /contact, /about, /team, /contact-us (sub-pages)
-  3. OSINT DuckDuckGo Domain Dork ("@domain.com")
-  4. WHOIS DNS Enrichment
-  Returns a LeadSchema with all found emails, phones, socials.
+  L1 — Homepage HTML (regex + mailto: links)
+  L2 — JSON-LD / schema.org structured data (Google indexes this)
+  L3 — Obfuscated email decoding ([at], (dot), HTML entity, Unicode)
+  L4 — Navbar contact page discovery (crawls the nav, finds /contact links)
+  L5 — Sitemap.xml / robots.txt crawl to find all internal pages
+  L6 — Static subpage brute-force (/contact, /about, /team, /staff ...)
+  L7 — OSINT DuckDuckGo Domain Dork ("@domain.com")
+  L8 — WHOIS DNS fallback
+
+Thread-pooled for parallel execution. Session reuse for speed.
 """
 
-import asyncio
 import re
+import json
 import time
+import html
 import random
+import urllib3
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse, urljoin, unquote
 from pydantic import BaseModel, ConfigDict
 from typing import List, Optional
-from urllib.parse import urlparse, urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ----- Configuration -----
-MAX_WORKERS = 20  # Parallel URL scraping threads
-REQUEST_TIMEOUT = 12  # Seconds
+# Disable SSL warnings for small business sites with expired certs
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Rotating user agents pool
+# ── Config ─────────────────────────────────────────────────────────────────
+MAX_WORKERS   = 25
+TIMEOUT       = 10
+MAX_SUBPAGES  = 12   # Max pages to crawl per site
+
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
 ]
 
-# ----- Lead Schema -----
+# ── Lead Schema ─────────────────────────────────────────────────────────────
 class LeadSchema(BaseModel):
-    name: Optional[str] = None
-    website: str
+    name:        Optional[str] = None
+    website:     str
     description: Optional[str] = None
-    source_url: str
-    emails: List[str] = []
-    phones: List[str] = []
-    socials: List[str] = []
+    source_url:  str
+    emails:      List[str] = []
+    phones:      List[str] = []
+    socials:     List[str] = []
     model_config = ConfigDict(extra="ignore")
 
 
-# ----- Email Quality Gate -----
-SPAM_KEYWORDS = [
-    "sentry", "w3.org", "example", ".png", ".jpg", ".gif", "no-reply", "noreply",
-    "mailer-daemon", "domain", "postmaster@", "hostmaster@",
-    "webmaster@", "abuse@", "compliance@", "privacy@",
+# ── Email Quality Gate ───────────────────────────────────────────────────────
+_SPAM = [
+    "sentry.", "w3.org", "example.", ".png", ".jpg", ".gif", ".svg", ".webp",
+    "no-reply", "noreply", "mailer-daemon", "postmaster@", "hostmaster@",
+    "webmaster@", "abuse@", "compliance@", "privacy@", "dkim@", "bounce@",
     "godaddy", "namecheap", "cloudflare", "networksolutions", "hostgator",
-    "register.com", "tucows", "gkg.net", "enom", "markmonitor", "domains@",
-    "web.com", "bluehost", "siteground", "dreamhost", "aws.com",
-    "amazon.com", "registrar", "yp.ca", "yellowpages", "legal@",
-    "temp", "fake", "spam", "trap", "catchall",
-    "shopify.com", "wixpress", "squarespace.com", "wordpress.com",
+    "register.com", "tucows", "enom", "markmonitor", "porkbun",
+    "bluehost", "siteground", "dreamhost", "hostinger",
+    "amazon.com", "amazonaws", "registrar", "yellowpages", "wixpress",
+    "squarespace.com", "shopify.com", "wordpress.com", "schema.org",
 ]
 
-EMAIL_REGEX = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}")
-PHONE_REGEX = re.compile(r"(?:\+?1[\.\-\s]?)?\(?\d{3}\)?[\.\-\s]?\d{3}[\.\-\s]?\d{4}")
-SOCIAL_REGEX = re.compile(r"https?://(?:www\.)?(?:facebook|twitter|instagram|linkedin|yelp)\.com/[^\s\"'<>]+")
+_EMAIL_RE   = re.compile(r"[a-zA-Z0-9_.+\-]+@[a-zA-Z0-9\-]+\.[a-zA-Z]{2,}")
+_PHONE_RE   = re.compile(r"(?:\+?1[\.\-\s]?)?\(?\d{3}\)?[\.\-\s]?\d{3}[\.\-\s]?\d{4}")
+_SOCIAL_RE  = re.compile(r"https?://(?:www\.)?(?:facebook|twitter|instagram|linkedin|yelp)\.com/[^\s\"'<>]+")
 
-def is_valid_email(email: str) -> bool:
-    email = email.lower()
-    if not re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,63}$", email):
+def _ok_email(e: str) -> bool:
+    e = e.lower()
+    if not re.match(r"^[a-zA-Z0-9_.+\-]+@[a-zA-Z0-9\-]+\.[a-zA-Z]{2,63}$", e):
         return False
-    return not any(kw in email for kw in SPAM_KEYWORDS)
+    return not any(s in e for s in _SPAM)
 
 
-# ----- Core HTTP Fetcher -----
-def _get_headers() -> dict:
-    return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+# ── HTTP helpers ─────────────────────────────────────────────────────────────
+def _session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent":      random.choice(USER_AGENTS),
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "DNT": "1",
-    }
+        "DNT":             "1",
+        "Connection":      "keep-alive",
+    })
+    s.max_redirects = 5
+    return s
 
-def _fetch_html(url: str, retries: int = 2) -> str:
-    for attempt in range(retries):
-        try:
-            resp = requests.get(
-                url,
-                headers=_get_headers(),
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=True,
-                verify=False,  # Skip SSL verification to avoid cert errors on small business sites
-            )
-            if resp.status_code == 200:
-                # Detect content type
-                ct = resp.headers.get("Content-Type", "")
-                if "text" in ct or "html" in ct:
-                    return resp.text
-        except requests.exceptions.Timeout:
-            pass
-        except requests.exceptions.ConnectionError:
-            break
-        except Exception:
-            break
-        if attempt < retries - 1:
-            time.sleep(0.5)
+def _get(sess: requests.Session, url: str) -> str:
+    try:
+        r = sess.get(url, timeout=TIMEOUT, verify=False, allow_redirects=True)
+        if r.status_code == 200 and ("text" in r.headers.get("Content-Type","") or "html" in r.headers.get("Content-Type","")):
+            return r.text
+    except Exception:
+        pass
     return ""
 
 
-def _parse_html(url: str, html: str) -> dict:
-    """Extract emails, phones, and socials from raw HTML."""
+# ── Layer helpers ─────────────────────────────────────────────────────────────
+
+# L1 + L3: Standard HTML parse + obfuscation decode
+def _emails_from_html(html_src: str) -> list[str]:
     emails = []
-    phones = []
-    socials = []
 
-    if not html:
-        return {"emails": emails, "phones": phones, "socials": socials}
+    # A. Raw regex on full HTML
+    emails += _EMAIL_RE.findall(html_src)
 
+    # B. Explicit mailto: hrefs
+    soup = BeautifulSoup(html_src, "html.parser")
+    for a in soup.find_all("a", href=True):
+        h = a["href"]
+        if h.lower().startswith("mailto:"):
+            e = unquote(h[7:]).split("?")[0].strip()
+            emails.append(e)
+
+    # C. Obfuscation decoding — catches [at], (dot), HTML entities, Unicode escapes
+    decoded = html.unescape(html_src)
+    # [at] / [dot] style
+    obf = re.sub(r'\s*\[at\]\s*', '@', decoded, flags=re.IGNORECASE)
+    obf = re.sub(r'\s*\(at\)\s*', '@', obf, flags=re.IGNORECASE)
+    obf = re.sub(r'\s*@\(\)\s*', '@', obf)
+    obf = re.sub(r'\s*\[dot\]\s*', '.', obf, flags=re.IGNORECASE)
+    obf = re.sub(r'\s*\(dot\)\s*', '.', obf, flags=re.IGNORECASE)
+    emails += _EMAIL_RE.findall(obf)
+
+    # D. Plain-text visible in the page (catches CSS-hidden text tricks)
     try:
-        soup = BeautifulSoup(html, "html.parser")
-
-        # Remove script/style/svg noise
-        for tag in soup(["script", "style", "svg", "noscript"]):
-            tag.decompose()
-
         text = soup.get_text(separator=" ")
-
-        # 1. Extract emails from raw HTML (catches obfuscated mailto: links too)
-        raw_html_emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}", html)
-        raw_text_emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}", text)
-        all_emails = list(set(raw_html_emails + raw_text_emails))
-        emails = [e for e in all_emails if is_valid_email(e)]
-
-        # 2. Check mailto: links (explicitly coded emails)
-        for tag in soup.find_all("a", href=True):
-            href = tag["href"]
-            if href.startswith("mailto:"):
-                e = href.replace("mailto:", "").split("?")[0].strip()
-                if e and is_valid_email(e) and e not in emails:
-                    emails.append(e)
-
-        # 3. Phones
-        phones = list(set(re.findall(PHONE_REGEX, text)))[:5]
-
-        # 4. Socials
-        socials = list(set(re.findall(SOCIAL_REGEX, html)))[:5]
-
+        emails += _EMAIL_RE.findall(text)
     except Exception:
         pass
 
-    return {
-        "emails": list(set(emails)),
-        "phones": phones,
-        "socials": socials
-    }
+    return list(set(e.lower() for e in emails if _ok_email(e)))
 
 
-# ----- DNS/MX Verification -----
-def _verify_email_domain(email: str) -> bool:
-    """Fast MX record check - ensures the domain actually receives mail."""
+# L2: JSON-LD / schema.org structured data
+def _emails_from_jsonld(html_src: str) -> list[str]:
+    emails = []
     try:
-        import dns.resolver
-        domain = email.split("@")[1]
-        dns.resolver.resolve(domain, "MX")
-        return True
+        soup = BeautifulSoup(html_src, "html.parser")
+        for tag in soup.find_all("script", {"type": "application/ld+json"}):
+            try:
+                data = json.loads(tag.string or "{}")
+                blob = json.dumps(data)  # Flatten to string for regex
+                emails += _EMAIL_RE.findall(blob)
+            except Exception:
+                pass
     except Exception:
-        return True  # Default to true to avoid false drops on DNS timeouts
+        pass
+    return [e for e in set(e.lower() for e in emails) if _ok_email(e)]
 
 
-# ----- Core Extraction Pipeline Per URL -----
+# L4: Nav contact page discovery
+def _find_contact_links(base_url: str, html_src: str) -> list[str]:
+    """Scan the HTML nav bars and anchor tags for contact/about/team pages."""
+    contact_keywords = ["contact", "about", "team", "staff", "reach", "connect",
+                        "get-in-touch", "people", "our-team", "office", "location"]
+    found = []
+    try:
+        soup = BeautifulSoup(html_src, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"].lower()
+            label = a.get_text(separator=" ").lower()
+            if any(k in href or k in label for k in contact_keywords):
+                full = urljoin(base_url, a["href"])
+                if urlparse(full).netloc == urlparse(base_url).netloc:
+                    found.append(full)
+    except Exception:
+        pass
+    return list(dict.fromkeys(found))[:8]  # Deduplicate, cap at 8
+
+
+# L5: Sitemap.xml / robots.txt intelligence
+def _sitemap_urls(sess: requests.Session, base_url: str) -> list[str]:
+    """Parse robots.txt to find sitemap, then scan sitemap for contact pages."""
+    contact_urls = []
+    contact_kw = re.compile(r"contact|about|team|staff|people|office", re.I)
+
+    # 1. Try robots.txt first
+    robots = _get(sess, f"{base_url}/robots.txt")
+    sitemap_locs = re.findall(r"Sitemap:\s*(https?://\S+)", robots, re.I)
+    if not sitemap_locs:
+        sitemap_locs = [f"{base_url}/sitemap.xml", f"{base_url}/sitemap_index.xml"]
+
+    for sitemap_url in sitemap_locs[:2]:
+        xml = _get(sess, sitemap_url)
+        if not xml:
+            continue
+        # Extract all <loc> URLs
+        locs = re.findall(r"<loc>(.*?)</loc>", xml, re.I | re.S)
+        for loc in locs:
+            loc = loc.strip()
+            if contact_kw.search(loc) and urlparse(loc).netloc == urlparse(base_url).netloc:
+                contact_urls.append(loc)
+
+    return list(dict.fromkeys(contact_urls))[:6]
+
+
+# ── Core Extraction Per URL ───────────────────────────────────────────────────
 def extract_lead(url: str) -> Optional[LeadSchema]:
     """
-    Full waterfall extraction for a single URL.
-    Tries homepage → subpages → OSINT Dorking → WHOIS DNS
+    Runs the full 8-layer extraction waterfall for a single URL.
+    Returns a LeadSchema or None if no contact info found.
     """
     try:
         parsed = urlparse(url)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         domain = parsed.netloc.lower().replace("www.", "")
 
-        print(f"[Engine V11] Scraping {url}...")
+        print(f"[V12] → {domain}")
 
-        # Track all found data
-        all_emails = []
-        all_phones = []
-        all_socials = []
+        sess = _session()
+        all_emails: list[str] = []
+        all_phones: list[str] = []
+        all_socials: list[str] = []
+        pages_crawled = set()
 
-        # === LAYER 1: Homepage ===
-        html = _fetch_html(url)
-        result = _parse_html(url, html)
-        all_emails.extend(result["emails"])
-        all_phones.extend(result["phones"])
-        all_socials.extend(result["socials"])
+        def _process_page(page_url: str):
+            if page_url in pages_crawled or len(pages_crawled) >= MAX_SUBPAGES:
+                return
+            pages_crawled.add(page_url)
+            src = _get(sess, page_url)
+            if not src:
+                return
+            # L1 + L3: HTML + obfuscation
+            all_emails.extend(_emails_from_html(src))
+            # L2: JSON-LD
+            all_emails.extend(_emails_from_jsonld(src))
+            # Phones + Socials
+            try:
+                all_phones.extend(_PHONE_RE.findall(BeautifulSoup(src, "html.parser").get_text()))
+                all_socials.extend(_SOCIAL_RE.findall(src))
+            except Exception:
+                pass
+            return src
 
-        # === LAYER 2: Deep Subpage Crawl ===
+        # === L1/L2/L3: Homepage ===
+        homepage_src = _process_page(url)
+
+        # === L4: Nav-discovered contact pages ===
+        if homepage_src and not all_emails:
+            nav_pages = _find_contact_links(base_url, homepage_src)
+            for p in nav_pages[:4]:
+                _process_page(p)
+                if all_emails:
+                    break
+
+        # === L5: Sitemap / robots.txt ===
         if not all_emails:
-            subpages = [
-                f"{base_url}/contact",
-                f"{base_url}/contact-us",
-                f"{base_url}/about",
-                f"{base_url}/about-us",
-                f"{base_url}/team",
-                f"{base_url}/our-team",
-                f"{base_url}/staff",
-                f"{base_url}/reach-us",
+            sitemap_pages = _sitemap_urls(sess, base_url)
+            for p in sitemap_pages:
+                _process_page(p)
+                if all_emails:
+                    break
+
+        # === L6: Static subpage brute-force ===
+        if not all_emails:
+            static_pages = [
+                f"{base_url}/contact",      f"{base_url}/contact-us",
+                f"{base_url}/about",        f"{base_url}/about-us",
+                f"{base_url}/team",         f"{base_url}/our-team",
+                f"{base_url}/staff",        f"{base_url}/reach-us",
+                f"{base_url}/get-in-touch", f"{base_url}/connect",
+                f"{base_url}/office",       f"{base_url}/locations",
             ]
-            print(f"  -> No emails on homepage. Deep crawling {len(subpages)} subpages...")
-            for sub_url in subpages:
-                sub_html = _fetch_html(sub_url)
-                if sub_html:
-                    sub_result = _parse_html(sub_url, sub_html)
-                    all_emails.extend(sub_result["emails"])
-                    all_phones.extend(sub_result["phones"])
-                    all_socials.extend(sub_result["socials"])
-                    if all_emails:
-                        print(f"  -> Found {len(all_emails)} emails on {sub_url}!")
-                        break
+            for p in static_pages:
+                if all_emails:
+                    break
+                _process_page(p)
 
-        # === LAYER 3: OSINT Domain Dork (DDG "@domain.com") ===
+        # === L7: OSINT Domain Dork ===
         if not all_emails:
-            print(f"  -> Initiating OSINT Dorking for @{domain}...")
-            from domain_enrichment import lookup_domain_emails
-            enrichments = lookup_domain_emails(url)
-            for e in enrichments:
-                email_val = e.get("email", "")
-                if email_val and is_valid_email(email_val):
-                    all_emails.append(email_val)
+            try:
+                from domain_enrichment import lookup_domain_emails
+                hits = lookup_domain_emails(url)
+                for h in hits:
+                    e = h.get("email", "")
+                    if e and _ok_email(e):
+                        all_emails.append(e)
+            except Exception:
+                pass
 
-        # === LAYER 4: WHOIS DNS Fallback ===
+        # === L8: WHOIS DNS fallback ===
         if not all_emails:
-            print(f"  -> Initiating WHOIS DNS fallback for {domain}...")
             try:
                 from enrichment import extract_whois_data
-                whois = extract_whois_data(url)
-                whois_emails = [e for e in whois.get("emails", []) if is_valid_email(e)]
-                all_emails.extend(whois_emails)
+                w = extract_whois_data(url)
+                all_emails.extend([e for e in w.get("emails", []) if _ok_email(e)])
             except Exception:
                 pass
 
-        # Deduplicate everything
-        all_emails = list(set(all_emails))
-        all_phones = list(set(all_phones))
-        all_socials = list(set(all_socials))
+        # ── De-duplicate ──────────────────────────────────────────────────
+        all_emails  = list(dict.fromkeys(all_emails))
+        all_phones  = list(dict.fromkeys(p.strip() for p in all_phones))[:5]
+        all_socials = list(dict.fromkeys(all_socials))[:5]
 
-        if all_emails or all_phones:
-            # Try to get a business name from the page title
-            name = domain
+        if not all_emails and not all_phones:
+            return None
+
+        # ── Business name from <title> ──────────────────────────────────
+        name = domain
+        if homepage_src:
             try:
-                soup = BeautifulSoup(html, "html.parser")
-                title_tag = soup.find("title")
-                if title_tag and title_tag.get_text(strip=True):
-                    name = title_tag.get_text(strip=True)[:80]
+                t = BeautifulSoup(homepage_src, "html.parser").find("title")
+                if t and t.get_text(strip=True):
+                    name = t.get_text(strip=True)[:80]
             except Exception:
                 pass
 
-            return LeadSchema(
-                name=name,
-                website=url,
-                description=f"Extracted from {domain}",
-                source_url=url,
-                emails=all_emails,
-                phones=all_phones,
-                socials=all_socials,
-            )
+        source = "V12 Waterfall"
+        if len(pages_crawled) > 1:
+            source = f"V12 ({len(pages_crawled)} pages crawled)"
+
+        return LeadSchema(
+            name=name,
+            website=url,
+            description=source,
+            source_url=url,
+            emails=all_emails,
+            phones=all_phones,
+            socials=all_socials,
+        )
 
     except Exception as e:
-        print(f"[Engine V11] Error on {url}: {e}")
-
-    print(f"[Engine V11] Dropped {url} — no contact info found.")
-    return None
+        print(f"[V12] ✗ {url} → {e}")
+        return None
 
 
-# ----- Parallel Batch Extractor -----
+# ── Parallel Batch Extractor ──────────────────────────────────────────────────
 def extract_all_leads(urls: List[str]) -> List[LeadSchema]:
     """
-    Runs extraction on all URLs in parallel using a thread pool.
-    No asyncio needed — uses plain ThreadPoolExecutor for simplicity.
+    Runs all URLs in a parallel thread pool.
+    Returns all successfully extracted LeadSchema objects.
     """
-    print(f"\n[Engine V11] Launching parallel extraction for {len(urls)} URLs...")
+    if not urls:
+        return []
+
     leads = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(extract_lead, u): u for u in urls}
+        for f in as_completed(futures):
+            r = f.result()
+            if r:
+                leads.append(r)
+                print(f"  ✅ {r.name} | {len(r.emails)} email(s)")
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(extract_lead, url): url for url in urls}
-        for future in as_completed(futures):
-            result = future.result()
-            if result:
-                leads.append(result)
-                print(f"  -> ✅ Lead captured: {result.name} ({len(result.emails)} emails)")
-
-    print(f"[Engine V11] Extracted {len(leads)} valid leads out of {len(urls)} URLs.")
     return leads
