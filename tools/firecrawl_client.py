@@ -23,19 +23,28 @@ class LeadSchema(BaseModel):
 
 def is_valid_email(email: str) -> bool:
     email = email.lower()
-    # High-quality role-based prefixes are allowed
-    # Drop noisy extensions or automated emails and generic registrars
+    
+    # 1. TLD & Format Enforcement
+    if not re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", email):
+        return False
+        
+    # 2. Aggressive Anti-Spam / Anti-Registrar Filter
     noise = [
-        "sentry", "w3.org", "example", ".png", ".jpg", "no-reply", "noreply", 
-        "mailer-daemon", "test", "domain", "admin@", "postmaster@",
-        "godaddy", "namecheap", "cloudflare", "networksolutions",
-        "register.com", "tucows", "gkg.net", "enom", "markmonitor",
+        "sentry", "w3.org", "example", ".png", ".jpg", ".gif", "no-reply", "noreply", 
+        "mailer-daemon", "test", "domain", "admin@", "postmaster@", "hostmaster@",
+        "webmaster@", "abuse@", "support@", "billing@", "compliance@", "privacy@",
+        "godaddy", "namecheap", "cloudflare", "networksolutions", "hostgator",
+        "register.com", "tucows", "gkg.net", "enom", "markmonitor", "domains@",
         "web.com", "bluehost", "siteground", "dreamhost", "aws.com",
-        "amazon.com", "privacy", "registrar", "abuse", "whois", "yp.ca",
-        "yellowpages", "contact@", "legal@"
+        "amazon.com", "registrar", "yp.ca", "yellowpages", "help@", "info@", 
+        "contact@", "legal@", "sales@", "marketing@", "careers@", "jobs@",
+        "123", "temp", "fake", "spam", "trap", "catchall", "hello@", "team@",
+        "shopify", "wix", "squarespace", "wordpress", "gov", "edu",
+        "wixpress", "customer", "orders@", "press@", "media@", "security@"
     ]
     if any(n in email for n in noise):
         return False
+        
     return True
 
 def parse_markdown_to_lead(url: str, md: str) -> LeadSchema:
