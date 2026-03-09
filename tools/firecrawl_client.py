@@ -30,7 +30,9 @@ def is_valid_email(email: str) -> bool:
         "mailer-daemon", "test", "domain", "admin@", "postmaster@",
         "godaddy", "namecheap", "cloudflare", "networksolutions",
         "register.com", "tucows", "gkg.net", "enom", "markmonitor",
-        "web.com", "bluehost", "siteground", "dreamhost"
+        "web.com", "bluehost", "siteground", "dreamhost", "aws.com",
+        "amazon.com", "privacy", "registrar", "abuse", "whois", "yp.ca",
+        "yellowpages", "contact@", "legal@"
     ]
     if any(n in email for n in noise):
         return False
