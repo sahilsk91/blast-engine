@@ -42,30 +42,81 @@ def main():
                 "Source_URL": lead.source_url
             })
     else:
-        print("[Mode] V11 Pure Python Business Extraction Engine")
+        print("[Mode] V11 Omni-Source Extraction Engine (Web + GMaps + LinkedIn X-Ray)")
         
         # Initialize the local persistent deduplication database immediately
         init_db()
 
-        # Over-fetch URLs because 1 URL != 1 valid lead. We fetch 10x buffer.
-        fetch_count = args.count * 10
-        print(f"[Engine] Need {args.count} leads. Fetching up to {fetch_count} URLs to guarantee yield...")
-        urls = get_search_results(args.query, fetch_count)
-        
-        if not urls:
-            print("No URLs found from Search Engines. Exiting.")
+        # Parse niche and location from query if available ("Lawyers in Houston")
+        query_parts = args.query.lower().split(" in ")
+        niche = query_parts[0].strip()
+        location = args.location or (query_parts[1].strip() if len(query_parts) > 1 else "")
+
+        all_urls = []
+        fetch_count = args.count * 8
+
+        # === SOURCE 1: Standard Web DDG/Google Search ===
+        print(f"\n[Pipeline] SOURCE 1: Standard Web Search for {fetch_count} URLs...")
+        web_urls = get_search_results(args.query, fetch_count)
+        all_urls.extend(web_urls)
+        print(f"[Pipeline] → Web Search returned {len(web_urls)} URLs")
+
+        # === SOURCE 2: Google Maps Business Listings ===
+        if location:
+            try:
+                from gmaps_scraper import find_business_urls_via_gmaps
+                print(f"\n[Pipeline] SOURCE 2: Google Maps scan for '{niche}' in '{location}'...")
+                maps_urls = find_business_urls_via_gmaps(niche, location, target=min(50, args.count * 3))
+                # Only add URLs not already in the web search results
+                known = set(all_urls)
+                new_maps = [u for u in maps_urls if u not in known]
+                all_urls.extend(new_maps)
+                print(f"[Pipeline] → GMaps returned {len(new_maps)} NEW unique business URLs")
+            except Exception as e:
+                print(f"[Pipeline] GMaps scraper skipped: {e}")
+
+        # === SOURCE 3: LinkedIn X-Ray Snippet Emails ===
+        # Pull direct emails from LinkedIn snippet text — zero login required
+        linkedin_data = []
+        if location or niche:
+            try:
+                print(f"\n[Pipeline] SOURCE 3: LinkedIn X-Ray for '{niche}' in '{location}'...")
+                from xray_search import run_xray_search
+                xray_target = min(args.count, 30)
+                xray_leads = run_xray_search("", xray_target, niche=niche, location=location)
+                for lead in xray_leads:
+                    new_emails = [e for e in lead.emails if not email_exists(e)]
+                    if new_emails:
+                        for e in new_emails:
+                            save_lead(e, lead.name, lead.source_url, args.query, location)
+                        linkedin_data.append({
+                            "Entity": lead.entity_type,
+                            "Name": lead.name,
+                            "Role/Desc": lead.title_or_description[:100],
+                            "Website/Social": lead.website_or_social,
+                            "Emails": ", ".join(new_emails),
+                            "Phones": ", ".join(lead.phones),
+                            "Source_URL": "LinkedIn X-Ray Dork"
+                        })
+                print(f"[Pipeline] → LinkedIn X-Ray returned {len(linkedin_data)} email leads directly from snippets")
+            except Exception as e:
+                print(f"[Pipeline] LinkedIn X-Ray skipped: {e}")
+
+        if not all_urls and not linkedin_data:
+            print("No URLs found from any source. Exiting.")
             return
+
 
         unique_data = []
         duplicates_caught = 0
         batch_size = 20
         
-        # Process URLs in chunks until we hit the exact target quota
-        for i in range(0, len(urls), batch_size):
+        # Process all collected URLs in batches until quota is hit
+        for i in range(0, len(all_urls), batch_size):
             if len(unique_data) >= args.count:
                 break
                 
-            batch_urls = urls[i:i+batch_size]
+            batch_urls = all_urls[i:i+batch_size]
             print(f"\n[Engine] Extraction Batch {i//batch_size + 1} ({len(batch_urls)} URLs)...")
             batch_leads = extract_all_leads(batch_urls)
             
@@ -106,7 +157,7 @@ def main():
         if duplicates_caught > 0:
             print(f"\n[DB Filter] Successfully caught and dropped {duplicates_caught} leads we already extracted in the past.")
             
-        data = unique_data # Point data to unique data for the delivery block below
+        data = unique_data + linkedin_data  # Merge all sources into final output
     
     # ---------------------------------------------------------
     # Delivery Block
