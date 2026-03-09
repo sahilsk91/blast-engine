@@ -121,6 +121,18 @@ async def extract_lead(url: str, session: aiohttp.ClientSession, semaphore: asyn
                     break
 
         if not lead.emails:
+            # V7 B2B Enrichment Fallback (Hunter.io / Apollo)
+            from domain_enrichment import lookup_domain_emails
+            enrichments = lookup_domain_emails(url)
+            if enrichments:
+                for enrich in enrichments:
+                    e = enrich["email"]
+                    if is_valid_email(e):
+                        lead.emails.append(e)
+                        lead.description = f"Scraped via V7 B2B Enrichment ({enrich['position']})"
+                lead.emails = list(set(lead.emails))
+
+        if not lead.emails:
             domain = parsed.netloc
             # V6 GOD-TIER: AI Vision OCR Extraction Fallback
             print(f"  -> Searching for obfuscated images. Initiating V6 AI Vision OCR...")
