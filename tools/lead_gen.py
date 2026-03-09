@@ -41,95 +41,87 @@ def main():
             })
     else:
         print("[Mode] Horizontal Business Search (Firecrawl Engine)")
-        # Phase 1: Search (Layer 3 tool)
-        urls = get_search_results(args.query, args.count)
-        if not urls:
-            print("No URLs found. Exiting.")
-            return
-            
-        # Phase 2: Extraction (Layer 3 tool)
-        leads = asyncio.run(extract_all_leads(urls))
         
-        if not leads:
-            print("No valid leads extracted (no contact info found). Exiting.")
+        import os
+        import datetime
+        from local_db import init_db, email_exists, save_lead
+        
+        # Initialize the local persistent deduplication database immediately
+        init_db()
+
+        # Over-fetch URLs because 1 URL != 1 valid lead. We fetch 10x buffer.
+        fetch_count = args.count * 10
+        print(f"[Engine] Need {args.count} leads. Fetching up to {fetch_count} URLs to guarantee yield...")
+        urls = get_search_results(args.query, fetch_count)
+        
+        if not urls:
+            print("No URLs found from Search Engines. Exiting.")
             return
-            
-        # Phase 3: Stylize / Formatting (Payload Delivery)
-        for lead in leads:
-            # We cap at the target count if we somehow got more
-            if len(data) >= args.count:
+
+        unique_data = []
+        duplicates_caught = 0
+        batch_size = 20
+        
+        # Process URLs in chunks until we hit the exact target quota
+        for i in range(0, len(urls), batch_size):
+            if len(unique_data) >= args.count:
                 break
                 
-            data.append({
-                "Entity": "Company",
-                "Name": lead.name or "N/A",
-                "Role/Desc": lead.description or "N/A",
-                "Website/Social": lead.website,
-                "Emails": ", ".join(lead.emails),
-                "Phones": ", ".join(lead.phones),
-                "Source_URL": lead.source_url
-            })
+            batch_urls = urls[i:i+batch_size]
+            print(f"\n[Engine] Extraction Batch {i//batch_size + 1} ({len(batch_urls)} URLs)...")
+            batch_leads = asyncio.run(extract_all_leads(batch_urls))
             
-        if args.omniscience:
-            from registry_extractor import hunt_company_officers
-            print("\n[V7 Omniscience] Engaging Automated Officer Hunter for scraped businesses...")
-            for lead in leads:
-                if not lead.name: continue
-                officers = hunt_company_officers(lead.name)
-                for o in officers:
-                    data.append({
-                        "Entity": "Person (Officer)",
-                        "Name": o["Name"],
-                        "Role/Desc": f"Found via V7 Omniscience ({lead.name})",
-                        "Website/Social": lead.website,
-                        "Emails": o["Personal_Email"],
-                        "Phones": "",
-                        "Source_URL": o["Source"]
-                    })
-                    print(f"  -> Added {o['Name']} ({o['Personal_Email']})")
-        
-    if not data:
-        print("No leads to save.")
-        return
-        
-    import os
-    import datetime
-    from local_db import init_db, email_exists, save_lead
-    
-    # Initialize the local persistent deduplication database
-    init_db()
-    
-    unique_data = []
-    duplicates_caught = 0
-    
-    for row in data:
-        emails_str = str(row.get("Emails", ""))
-        emails_list = [e.strip() for e in emails_str.split(",") if e.strip()]
-        new_emails = []
-        
-        for e in emails_list:
-            if not email_exists(e):
-                new_emails.append(e)
-                save_lead(e, str(row.get("Name", "N/A")), str(row.get("Source_URL", "")), args.query, args.location)
+            # Immediately validate and deduplicate the batch
+            for lead in batch_leads:
+                if len(unique_data) >= args.count:
+                    break
+                    
+                emails_list = lead.emails
+                new_emails = []
                 
-        # If row had emails, but NONE are new (all existed in DB), completely skip this lead
-        if emails_list and not new_emails:
-            duplicates_caught += 1
-            continue
+                # Check absolute deduplication
+                for e in emails_list:
+                    if not email_exists(e):
+                        new_emails.append(e)
+                
+                if emails_list and not new_emails:
+                    duplicates_caught += 1
+                    continue
+                    
+                if new_emails:
+                    # Save to DB to block it in future batches/runs instantly
+                    for e in new_emails:
+                        save_lead(e, str(lead.name or "N/A"), str(lead.source_url), args.query, args.location)
+                        
+                    unique_data.append({
+                        "Entity": "Company",
+                        "Name": lead.name or "N/A",
+                        "Role/Desc": lead.description or "N/A",
+                        "Website/Social": lead.website,
+                        "Emails": ", ".join(new_emails),
+                        "Phones": ", ".join(lead.phones),
+                        "Source_URL": lead.source_url
+                    })
+
+            print(f"[Pipeline] Current Yield: {len(unique_data)}/{args.count} unique verified leads.")
+
+        if duplicates_caught > 0:
+            print(f"\n[DB Filter] Successfully caught and dropped {duplicates_caught} leads we already extracted in the past.")
             
-        row["Emails"] = ", ".join(new_emails)
-        unique_data.append(row)
-        
-    if duplicates_caught > 0:
-        print(f"\n[DB Filter] Successfully caught and dropped {duplicates_caught} leads we already extracted in the past.")
-        
-    if not unique_data:
-        print("\n[Delivery] No NEW unique leads to save (all were previously extracted).")
+        data = unique_data # Point data to unique data for the delivery block below
+    
+    # ---------------------------------------------------------
+    # Delivery Block
+    # ---------------------------------------------------------
+    if not data:
+        print("\n[Delivery] No NEW unique leads were found during this run.")
         print("=== B.L.A.S.T Lead Gen Complete ===")
         return
         
-    print(f"\n[Delivery] Formatting {len(unique_data)} NEW unique leads into CSV...")
+    print(f"\n[Delivery] Formatting {len(data)} NEW unique leads into CSV...")
     
+    import os
+    import datetime
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     output_dir = os.path.join(project_root, "exports")
     os.makedirs(output_dir, exist_ok=True)
@@ -138,10 +130,10 @@ def main():
     clean_query = "".join([c if c.isalnum() else "_" for c in args.query])
     output_file = os.path.join(output_dir, f"{clean_query}_{timestamp}.csv")
     
-    df = pd.DataFrame(unique_data)
+    df = pd.DataFrame(data)
     df.to_csv(output_file, index=False)
     
-    print(f"[Delivery] Success! Saved {len(unique_data)} NEW leads to {output_file}.")
+    print(f"[Delivery] Success! Saved {len(data)} NEW leads to {output_file}.")
     print("=== B.L.A.S.T Lead Gen Complete ===")
 
 if __name__ == "__main__":
