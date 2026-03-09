@@ -1,9 +1,11 @@
-import asyncio
+import os
+import datetime
 import pandas as pd
 import argparse
 from search_engine import get_search_results
 from firecrawl_client import extract_all_leads
 from xray_search import run_xray_search
+from local_db import init_db, email_exists, save_lead
 
 def main():
     parser = argparse.ArgumentParser(description="B.L.A.S.T Lead Generation Script (Omni-Extractor V9)")
@@ -40,11 +42,7 @@ def main():
                 "Source_URL": lead.source_url
             })
     else:
-        print("[Mode] Horizontal Business Search (Firecrawl Engine)")
-        
-        import os
-        import datetime
-        from local_db import init_db, email_exists, save_lead
+        print("[Mode] V11 Pure Python Business Extraction Engine")
         
         # Initialize the local persistent deduplication database immediately
         init_db()
@@ -69,7 +67,7 @@ def main():
                 
             batch_urls = urls[i:i+batch_size]
             print(f"\n[Engine] Extraction Batch {i//batch_size + 1} ({len(batch_urls)} URLs)...")
-            batch_leads = asyncio.run(extract_all_leads(batch_urls))
+            batch_leads = extract_all_leads(batch_urls)
             
             # Immediately validate and deduplicate the batch
             for lead in batch_leads:
@@ -120,8 +118,6 @@ def main():
         
     print(f"\n[Delivery] Formatting {len(data)} NEW unique leads into CSV...")
     
-    import os
-    import datetime
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     output_dir = os.path.join(project_root, "exports")
     os.makedirs(output_dir, exist_ok=True)

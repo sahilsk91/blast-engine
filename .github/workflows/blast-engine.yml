@@ -96,23 +96,11 @@ jobs:
 
     - name: Install Python Dependencies
       run: |
-        pip install requests beautifulsoup4 fake-useragent firecrawl-py pandas openai httpx duckduckgo-search
+        pip install requests beautifulsoup4 fake-useragent pandas openai httpx duckduckgo-search dnspython python-whois pytesseract Pillow aiohttp pydantic
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         
-    - name: Spin up Firecrawl Services (Background)
-      if: contains(github.event.inputs.mode, 'V5') || contains(github.event.inputs.mode, 'V9')
-      run: |
-        cd services/firecrawl/apps/api
-        touch .env.example
-        touch .env
-        echo "USE_DB_AUTHENTICATION=false" >> .env
-        echo "PORT=3002" >> .env
-        echo "NUM_WORKERS=2" >> .env
-        cd ../../
-        docker compose up -d
-        echo "Waiting for Firecrawl Docker container to boot strictly (120s)..."
-        sleep 120
-        
+
+    
     - name: Execute B.L.A.S.T Engine (Location ${{ matrix.location }})
       env:
         NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
