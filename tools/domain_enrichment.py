@@ -7,44 +7,72 @@ from urllib.parse import urlparse
 
 def lookup_domain_emails(url: str, limit: int = 3) -> list[dict]:
     """
-    Takes a URL, extracts the domain, and searches Hunter.io or Snov.io 
-    to find highly verified employee/founder emails that are not listed on the website.
+    Takes a URL, extracts the domain, and searches Hunter.io or Snov.io.
+    If no API key is present, it uses 100% Free OSINT Search Engine Dorking 
+    to extract emails by searching the entire web for "@{domain}".
     """
-    hunter_key = os.getenv("HUNTER_API_KEY")
-    
-    if not hunter_key:
-        return []
-        
     try:
         domain = urlparse(url).netloc.lower()
         if domain.startswith("www."):
             domain = domain[4:]
+    except:
+        return []
+
+    hunter_key = os.getenv("HUNTER_API_KEY")
+    
+    if hunter_key:
+        try:
+            print(f"  -> [V7 B2B Enrichment] Hitting Hunter.io for {domain}...")
+            endpoint = f"https://api.hunter.io/v2/domain-search?domain={domain}&api_key={hunter_key}&limit={limit}&type=personal"
+            resp = requests.get(endpoint, timeout=15)
             
-        print(f"  -> [V7 B2B Enrichment] Hitting Hunter.io for {domain}...")
+            if resp.status_code == 200:
+                data = resp.json().get("data", {})
+                emails = data.get("emails", [])
+                
+                enrichments = []
+                for e in emails:
+                    val = e.get("value")
+                    position = e.get("position") or "Employee"
+                    if val:
+                        enrichments.append({"email": val, "position": position})
+                
+                if enrichments:
+                    print(f"  -> [V7 SUCCESS] Hunter.io returned {len(enrichments)} hidden human emails for {domain}!")
+                    return enrichments
+        except Exception as e:
+            print(f"  -> [V7 B2B Enrichment] Hunter failed: {e}")
+
+    # 100% FREE OSINT FALLBACK ENGINE (No API Key Required)
+    print(f"  -> [V7 Free OSINT] Commencing Deep Dork Search for @{domain}...")
+    try:
+        from duckduckgo_search import DDGS
+        import re
         
-        endpoint = f"https://api.hunter.io/v2/domain-search?domain={domain}&api_key={hunter_key}&limit={limit}&type=personal"
-        resp = requests.get(endpoint, timeout=15)
+        dork_query = f'"@{domain}"'
+        results_text = ""
         
-        if resp.status_code == 200:
-            data = resp.json().get("data", {})
-            emails = data.get("emails", [])
+        with DDGS() as ddgs:
+            for r in ddgs.text(dork_query, max_results=20):
+                results_text += r.get("body", "") + " " + r.get("title", "") + " "
+                
+        # Scrape precisely for the domain
+        found_emails = list(set(re.findall(f'[a-zA-Z0-9_.+-]+@{domain}', results_text.lower())))
+        
+        enrichments = []
+        for e in found_emails:
+            # To simulate B2B databases, we aggressively seek *personal* names, skipping generic info@
+            generic = ["info@", "sales@", "contact@", "hello@", "support@", "admin@", "billing@", "jobs@"]
+            if not any(g in e for g in generic):
+                enrichments.append({"email": e, "position": "Found via V7 Free OSINT Dorking"})
+                
+        if enrichments:
+            print(f"  -> [V7 OSINT SUCCESS] Bypassed API! Extracted {len(enrichments)} deeply hidden human emails from public footprints!")
             
-            enrichments = []
-            for e in emails:
-                val = e.get("value")
-                position = e.get("position") or "Employee"
-                if val:
-                    enrichments.append({"email": val, "position": position})
-            
-            if enrichments:
-                print(f"  -> [V7 SUCCESS] Hunter.io returned {len(enrichments)} hidden human emails for {domain}!")
-            return enrichments
-        else:
-            print(f"  -> [V7 Error] Hunter API returned {resp.status_code}")
-            return []
-            
+        return enrichments
+        
     except Exception as e:
-        print(f"  -> [V7 Error] Domain Enrichment failed: {e}")
+        print(f"  -> [V7 Free OSINT] Search Engine Error: {e}")
         return []
 
 if __name__ == "__main__":

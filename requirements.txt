@@ -2,7 +2,7 @@ pandas
 aiohttp
 pydantic
 googlesearch-python
-ddgs
+duckduckgo-search
 beautifulsoup4
 python-whois
 fake-useragent

@@ -1,6 +1,6 @@
 import time
 from googlesearch import search
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 from urllib.parse import urlparse
 import warnings
 
