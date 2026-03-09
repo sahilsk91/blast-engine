@@ -2,7 +2,7 @@ import re
 import time
 import random
 from googlesearch import search
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 from pydantic import BaseModel, ConfigDict
 from typing import List, Optional
 import warnings

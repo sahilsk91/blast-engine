@@ -1,5 +1,5 @@
 import re
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 from googlesearch import search
 import time
 from search_engine import get_spoofed_headers, V6_PROXY
