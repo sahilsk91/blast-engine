@@ -227,41 +227,32 @@ def get_search_results(query: str, target_count: int = 50) -> list[str]:
     except Exception as e:
         print(f"[Search Engine V9] DDG Global Error: {e}")
 
-    # ---- Secondary: Brave Search Fallback (Zero Blocking) ----
+    # ---- Secondary: SearxNG Metasearch Fallback (Zero Blocking) ----
     if len(valid_urls) < target_count:
-        print(f"\n[Search Engine V9] Valid URLs: {len(valid_urls)}/{target_count}. Engaging Brave Search Fallback...")
-        import requests
-        from bs4 import BeautifulSoup
+        print(f"\n[Search Engine V9] Valid URLs: {len(valid_urls)}/{target_count}. Engaging SearxNG (Meta-Search) Fallback...")
+        import searxng_metasearch
 
         for i, q in enumerate(queries):
             if len(valid_urls) >= target_count:
                 break
             
-            print(f"  [{i+1}/{len(queries)}] Brave: '{q[:50]}...'")
+            print(f"  [{i+1}/{len(queries)}] SearxNG: '{q[:50]}...'")
             try:
-                url = f"https://search.brave.com/search?q={requests.utils.quote(q)}"
-                headers = {
-                    "User-Agent": get_spoofed_headers()["User-Agent"],
-                    "Accept": "text/html,application/xhtml+xml,application/xml",
-                    "Accept-Language": "en-US,en;q=0.9"
-                }
+                # We ask Searx to grab 20 results per query from Google/Bing
+                searx_urls = searxng_metasearch.searx_search(q, 20)
                 
-                # Brave uses an invisible bot protection sometimes but we can pass basic headers
-                r = requests.get(url, headers=headers, timeout=10)
-                
-                if r.status_code == 200:
-                    soup = BeautifulSoup(r.text, 'html.parser')
-                    for a in soup.find_all('a', href=True):
-                        h = a['href']
-                        if h.startswith("http") and not "brave.com" in h and not "duckduckgo" in h:
-                            if _is_valid_business_url(h) and h not in urls_found:
-                                urls_found.add(h)
-                                valid_urls.append(h)
-                                if len(valid_urls) >= target_count:
-                                    break
-                time.sleep(1.5)
+                hits = 0
+                for h in searx_urls:
+                    if _is_valid_business_url(h) and h not in urls_found:
+                        urls_found.add(h)
+                        valid_urls.append(h)
+                        hits += 1
+                        if len(valid_urls) >= target_count:
+                            break
+                            
+                time.sleep(1) # Be polite to public nodes
             except Exception as e:
-                print(f"  -> Brave error: {e}.")
+                print(f"  -> SearxNG error: {e}.")
                 continue
 
     # ---- Tertiary: Google Fallback ----
