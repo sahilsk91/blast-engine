@@ -156,10 +156,7 @@ def run_business_mode(query: str, niche: str, location: str, count: int) -> list
 
         batch = all_urls[i : i + BATCH_SIZE]
         print(f"\n[Waterfall] Batch {i // BATCH_SIZE + 1}  ({len(batch)} URLs)…")
-        
-        # Wrapping in asyncio event loop since Firecrawl client was reverted to async
-        import asyncio
-        leads = asyncio.run(extract_all_leads(batch))
+        leads = extract_all_leads(batch)
 
         for lead in leads:
             if len(unique_rows) >= count:
